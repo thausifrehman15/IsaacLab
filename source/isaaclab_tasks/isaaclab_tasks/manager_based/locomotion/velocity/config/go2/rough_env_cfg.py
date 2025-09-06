@@ -59,7 +59,30 @@ class UnitreeGo2RoughEnvCfg(LocomotionVelocityRoughEnvCfg):
 
         # terminations
         self.terminations.base_contact.params["sensor_cfg"].body_names = "base"
-
+        # Make the Go2 run like a cheetah
+        if hasattr(self, 'commands') and hasattr(self.commands, 'base_velocity'):
+            self.commands.base_velocity.debug_vis = False
+            # Cheetah-like speed range (much faster, with a minimum speed)
+            self.commands.base_velocity.ranges.lin_vel_x = (3.0, 8.0)  # Always running, higher top speed
+            
+            # Increase angular velocity for more agile turning
+            self.commands.base_velocity.ranges.ang_vel_z = (-1.5, 1.5)
+            
+            # Strongly reward forward velocity
+            if hasattr(self.rewards, 'track_lin_vel_xy_exp'):
+                self.rewards.track_lin_vel_xy_exp.weight = 3.0  # Higher weight on velocity tracking
+            
+            # Reduce penalty for torque to allow more powerful movements
+            if hasattr(self.rewards, 'dof_torques_l2'):
+                self.rewards.dof_torques_l2.weight = -0.0001  # Less penalty (was -0.0002)
+            
+            # Reduce penalty for acceleration to allow more dynamic movements
+            if hasattr(self.rewards, 'dof_acc_l2'):
+                self.rewards.dof_acc_l2.weight = -1.25e-7  # Half the penalty (was -2.5e-7)
+            
+            # Increase action scale for more expansive leg movements
+            self.actions.joint_pos.scale = 0.35  # Increased from 0.25 for more dynamic motion
+            
 
 @configclass
 class UnitreeGo2RoughEnvCfg_PLAY(UnitreeGo2RoughEnvCfg):
