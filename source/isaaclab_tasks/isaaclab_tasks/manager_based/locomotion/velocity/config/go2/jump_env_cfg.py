@@ -42,73 +42,15 @@ PLATFORM_LENGTH = 4.0
 PLATFORM_WIDTH = 4.0
 PLATFORM_HEIGHT = 0.25
 START_PLATFORM_POS = (0.0, 0.0, PLATFORM_HEIGHT / 2.0)
-INITIAL_TARGET_PLATFORM_POS = (PLATFORM_LENGTH, 0.0, PLATFORM_HEIGHT / 2.0)  # CHANGED: Start with zero gap (adjacent/overlapping for walking)
-JUMP_GAP_DISTANCE = INITIAL_TARGET_PLATFORM_POS[0] - START_PLATFORM_POS[0] - PLATFORM_LENGTH  # Initial gap is 0
+INITIAL_TARGET_PLATFORM_POS = (PLATFORM_LENGTH, 0.0, PLATFORM_HEIGHT / 2.0)  # Start with zero gap
 
 # -- Custom Reward & Termination Functions (Vectorized) --
 def approach_target(env: ManagerBasedRLEnvCfg, std: float = 2.0) -> torch.Tensor:
-    """Reward for approaching the jump-off edge of the platform."""
-    target_x = env.scene["target_platform"].data.root_pos_w[:, 0]  
+    """Reward for approaching the target platform."""
+    target_x = env.scene["target_platform"].data.root_pos_w[:, 0]
     robot_x = env.scene["robot"].data.root_pos_w[:, 0]
     distance_to_target = torch.abs(target_x - robot_x)
     return torch.exp(-distance_to_target / std)
-
-def jump_preparation_reward(env: ManagerBasedRLEnvCfg) -> torch.Tensor:
-    """Reward for reaching the jump-off edge of the start platform."""
-    start_pos = env.scene["start_platform"].data.root_pos_w
-    jump_edge_x = start_pos[:, 0] + PLATFORM_LENGTH / 2.0
-    robot_x = env.scene["robot"].data.root_pos_w[:, 0]
-    distance_to_edge = torch.abs(jump_edge_x - robot_x)
-    return torch.exp(-distance_to_edge / 1.0)
-
-def height_bonus_in_gap(env: ManagerBasedRLEnvCfg) -> torch.Tensor:
-    """Reward for gaining height while in the gap."""
-    robot_pos = env.scene["robot"].data.root_pos_w
-    start_pos = env.scene["start_platform"].data.root_pos_w
-    target_pos = env.scene["target_platform"].data.root_pos_w
-    in_gap_x = (robot_pos[:, 0] > start_pos[:, 0] + PLATFORM_LENGTH / 2.0) & (
-        robot_pos[:, 0] < target_pos[:, 0] - PLATFORM_LENGTH / 2.0
-    )
-    height_above_ground = robot_pos[:, 2] - PLATFORM_HEIGHT / 2.0
-    height_reward = torch.clamp(height_above_ground / 2.0, 0.0, 1.0)  # Max reward at 2m height
-    return (in_gap_x.float() * height_reward)
-
-def maintain_forward_direction(env: ManagerBasedRLEnvCfg) -> torch.Tensor:
-    """Reward for facing the target platform (positive x-direction)."""
-    forward_vec_world = math_utils.quat_apply(
-        env.scene["robot"].data.root_quat_w, env.scene["robot"].data.FORWARD_VEC_B
-    )
-    return torch.exp(forward_vec_world[:, 0])
-
-def forward_world_velocity(env: ManagerBasedRLEnvCfg) -> torch.Tensor:
-    """Reward for moving forward in the world's positive x-direction."""
-    # Use world frame velocity (_w) instead of body frame (_b)
-    return torch.clamp(env.scene["robot"].data.root_lin_vel_w[:, 0], min=0.0)
-
-def forward_velocity(env: ManagerBasedRLEnvCfg) -> torch.Tensor:
-    """Reward for moving forward."""
-    return torch.clamp(env.scene["robot"].data.root_lin_vel_b[:, 0], min=0.0)
-
-def approach_and_align_reward(env: ManagerBasedRLEnvCfg) -> torch.Tensor:
-    """Combined reward for approaching, aligning, and moving forward."""
-    return approach_target(env) * maintain_forward_direction(env) * forward_world_velocity(env)
-
-def is_airborne_over_gap(env: ManagerBasedRLEnvCfg) -> torch.Tensor:
-    """Reward for being airborne over the gap between platforms."""
-    robot_pos = env.scene["robot"].data.root_pos_w
-    start_pos = env.scene["start_platform"].data.root_pos_w
-    target_pos = env.scene["target_platform"].data.root_pos_w
-    in_gap_x = (robot_pos[:, 0] > start_pos[:, 0] + PLATFORM_LENGTH / 2.0) & (
-        robot_pos[:, 0] < target_pos[:, 0] - PLATFORM_LENGTH / 2.0
-    )
-    latest_forces = env.scene["contact_forces"].data.net_forces_w_history[:, 0, :, :]
-    in_air = torch.all(torch.sum(latest_forces, dim=-1).abs() < 1.0, dim=-1)
-    return (in_air & in_gap_x).float()
-
-def penalize_turning(env: ManagerBasedRLEnvCfg) -> torch.Tensor:
-    """Penalizes the robot for turning by squaring its angular z-velocity."""
-    ang_vel_z = env.scene["robot"].data.root_ang_vel_b[:, 2]
-    return torch.square(ang_vel_z)
 
 def landed_on_target(env: ManagerBasedRLEnvCfg) -> torch.Tensor:
     """Fixed: Strict target platform bounds."""
@@ -123,8 +65,6 @@ def landed_on_target(env: ManagerBasedRLEnvCfg) -> torch.Tensor:
     latest_forces = env.scene["contact_forces"].data.net_forces_w_history[:, 0, :, :]
     in_contact = torch.any(torch.sum(latest_forces, dim=-1).abs() > 1.0, dim=-1)
     should_terminate = on_target_x & on_target_y & in_contact
-    terminating_env_ids = torch.where(should_terminate)[0]
-    print_robot_position(env, terminating_env_ids, event_type="SUCCESS-TERMINATION")
     return should_terminate
 
 def fell_off_start_platform(env: ManagerBasedRLEnvCfg) -> torch.Tensor:
@@ -134,9 +74,12 @@ def fell_off_start_platform(env: ManagerBasedRLEnvCfg) -> torch.Tensor:
     on_start_side = robot_pos[:, 0] < start_pos[:, 0] + PLATFORM_LENGTH / 2.0 + 0.5
     is_low = robot_pos[:, 2] < PLATFORM_HEIGHT * 0.8
     should_terminate = on_start_side & is_low
-    terminating_env_ids = torch.where(should_terminate)[0]
-    print_robot_position(env, terminating_env_ids, event_type="FELL-OFF-TERMINATION")
     return should_terminate
+
+def penalize_standing_still(env: ManagerBasedRLEnvCfg) -> torch.Tensor:
+    """Penalty for standing still (low velocity)."""
+    lin_vel = env.scene["robot"].data.root_lin_vel_w[:, 0]
+    return -torch.clamp(lin_vel.abs(), max=0.1)  # Negative if speed < 0.1 m/s
 
 def reset_robot_to_start(env: ManagerBasedRLEnvCfg, env_ids: torch.Tensor):
     """Explicitly resets the robot to a random position on its own starting platform."""
@@ -156,24 +99,6 @@ def reset_robot_to_start(env: ManagerBasedRLEnvCfg, env_ids: torch.Tensor):
     root_states[:, 4:7] = 0.0
     root_states[:, 7:13] = 0.0
     env.scene["robot"].write_root_state_to_sim(root_states, env_ids)
-
-def penalize_falling(env: ManagerBasedRLEnvCfg) -> torch.Tensor:
-    """Returns a penalty when the robot is in a state that would terminate for falling."""
-    return fell_off_start_platform(env).float()
-
-###########logging
-def print_robot_position(env: ManagerBasedRLEnvCfg, env_ids: torch.Tensor, event_type: str):
-    """Prints the position of specified robots."""
-    if len(env_ids) == 0:
-        return
-    positions = env.scene["robot"].data.root_pos_w[env_ids].cpu().numpy()
-    for i, env_id in enumerate(env_ids):
-        pos = positions[i]
-        print(f"[Env {env_id.item()}] {event_type} at position: x={pos[0]:.2f}, y={pos[1]:.2f}, z={pos[2]:.2f}")
-
-def log_reset_location(env: ManagerBasedRLEnvCfg, env_ids: torch.Tensor):
-    """Event function to log the robot's position upon reset."""
-    print_robot_position(env, env_ids, event_type="RESET")
 
 # NEW: Function to adjust gap based on curriculum (step-based)
 def adjust_gap(env: ManagerBasedRLEnvCfg, env_ids: torch.Tensor, threshold_steps: int, increment: float, max_gap: float, initial_gap: float):
@@ -217,7 +142,7 @@ class UnitreeGo2JumpSceneCfg(InteractiveSceneCfg):
             visual_material_path="/World/Looks/red_material",
             physics_material=RigidBodyMaterialCfg(static_friction=1.0, dynamic_friction=1.0, restitution=0.0),
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=INITIAL_TARGET_PLATFORM_POS),  # CHANGED: Dynamic initial pos
+        init_state=RigidObjectCfg.InitialStateCfg(pos=INITIAL_TARGET_PLATFORM_POS),
     )
 
 @configclass
@@ -242,25 +167,24 @@ class UnitreeGo2JumpRewardsCfg(Go2BaseRewardsCfg):
     action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.005)
     dof_torques_l2 = RewTerm(func=mdp.joint_torques_l2, weight=-1.0e-7) 
     
+    flat_orientation = RewTerm(func=mdp.flat_orientation_l2, weight=-5.0)  # Add this line
+    
     # Re-enable velocity tracking to encourage forward movement
     track_lin_vel_xy_exp = RewTerm(
         func=mdp.track_lin_vel_xy_exp,
         weight=1.5,
-        params={"command_name": "base_velocity", "std": 0.25},  # FIXED: Added mandatory 'std' parameter
-    )  # NEW: Added to help with walking/approaching
+        params={"command_name": "base_velocity", 
+                "std": 0.25,
+                "asset_cfg": SceneEntityCfg("robot")},
+    ) 
 
     # Multi-stage jumping rewards with higher weights
-    jump_preparation = RewTerm(func=jump_preparation_reward, weight=10.0)  # CHANGED: Boost for early walking
-    approach_target = RewTerm(func=approach_target, weight=25.0)  # CHANGED: Higher boost to encourage reaching target
-    height_in_gap = RewTerm(func=height_bonus_in_gap, weight=15.0)
-    airborne_bonus = RewTerm(func=is_airborne_over_gap, weight=20.0)
+    approach_target = RewTerm(func=approach_target, weight=15.0)  # CHANGED: Boost
     landing_bonus = RewTerm(func=landed_on_target, weight=200.0) 
     
-    approach_and_align = RewTerm(func=approach_and_align_reward, weight=5.0)  # NEW: Added to encourage alignment and forward movement
-    
-    penalize_turning = RewTerm(func=penalize_turning, weight=-0.01)  # NEW: Added to discourage turning
-    
-    fell_off_penalty = RewTerm(func=penalize_falling, weight=-5.0)  # CHANGED: Reduce penalty initially to encourage exploration
+    standing_still_penalty = RewTerm(func=penalize_standing_still, weight=-0.1)
+
+    fell_off_penalty = RewTerm(func=fell_off_start_platform, weight=-5.0)
     
     # Disable conflicting rewards
     feet_air_time = None
@@ -271,7 +195,7 @@ class UnitreeGo2JumpTerminationsCfg(Go2BaseTerminationsCfg):
     """Termination conditions for the jumping task."""
     base_contact = DoneTerm(
         func=mdp.illegal_contact,
-        params={"sensor_cfg": SceneEntityCfg("base_contact"), "threshold": 1.0},  # CHANGED: Back to 1.0 to penalize falling more strictly
+        params={"sensor_cfg": SceneEntityCfg("base_contact"), "threshold": 1.0},
     )
     fell_off = DoneTerm(func=fell_off_start_platform)
     success = DoneTerm(func=landed_on_target)
@@ -285,7 +209,7 @@ class UnitreeGo2JumpCommandsCfg:
         rel_standing_envs=0.0,
         debug_vis=True,
         ranges=mdp.UniformVelocityCommandCfg.Ranges(
-            lin_vel_x=(0.5, 1.5),  # CHANGED: Lower speeds for stable walking initially
+            lin_vel_x=(0.5, 1.5),
             lin_vel_y=(0.0, 0.0),
             ang_vel_z=(0.0, 0.0),
         ),
@@ -303,37 +227,33 @@ class UnitreeGo2JumpEventsCfg:
         mode="reset",
         params={"position_range": (1.0, 1.0), "velocity_range": (0.0, 0.0), "asset_cfg": SceneEntityCfg("robot")},
     )
-    log_on_reset = EventTerm(
-        func=log_reset_location,
-        mode="reset",
-    )
-    # NEW: Curriculum for increasing gap
     curriculum_gap = EventTerm(
         func=adjust_gap,
-        mode="interval",  # Adjust every N steps
+        mode="interval",
         params={
-            "threshold_steps": 5000000,  # CHANGED: Increase every 5M steps to give more time for learning at each level
-            "increment": 0.1,  # CHANGED: Smaller increments for smoother curriculum
-            "max_gap": 2.0,   # Cap at 2m gap
+            "threshold_steps": 5000000,
+            "increment": 0.1,
+            "max_gap": 2.0,
             "initial_gap": 0.0,
         },
-        interval_range_s=(5.0, 5.0),  # Check every 5 seconds (adjust based on sim.dt and desired step interval)
+        interval_range_s=(5.0, 5.0),
     )
 
 @configclass
 class UnitreeGo2JumpEnvCfg(ManagerBasedRLEnvCfg):
     """Configuration for the Unitree Go2 jumping environment."""
-    scene: UnitreeGo2JumpSceneCfg = UnitreeGo2JumpSceneCfg(num_envs=4000, env_spacing=12.0)
-    rewards: UnitreeGo2JumpRewardsCfg = UnitreeGo2JumpRewardsCfg()
-    terminations: UnitreeGo2JumpTerminationsCfg = UnitreeGo2JumpTerminationsCfg()
-    commands: UnitreeGo2JumpCommandsCfg = UnitreeGo2JumpCommandsCfg()
-    events: UnitreeGo2JumpEventsCfg = UnitreeGo2JumpEventsCfg()
-    actions: Go2BaseActionsCfg = Go2BaseActionsCfg()
-    observations: UnitreeGo2JumpObservationsCfg = UnitreeGo2JumpObservationsCfg()
-    
+    decimation = 4
+    episode_length_s = 15.0
+
+    scene = UnitreeGo2JumpSceneCfg(num_envs=4000, env_spacing=12.0)
+    rewards = UnitreeGo2JumpRewardsCfg()
+    terminations = UnitreeGo2JumpTerminationsCfg()
+    commands = UnitreeGo2JumpCommandsCfg()
+    events = UnitreeGo2JumpEventsCfg()
+    actions = Go2BaseActionsCfg()
+    observations = UnitreeGo2JumpObservationsCfg()
+
     def __post_init__(self):
-        self.decimation = 4
-        self.episode_length_s = 15.0  # CHANGED: Longer for curriculum stages
         self.sim.dt = 0.005
         self.sim.render_interval = self.decimation
         self.sim.physics_material = RigidBodyMaterialCfg(
@@ -351,7 +271,7 @@ class UnitreeGo2JumpEnvCfg_PLAY(UnitreeGo2JumpEnvCfg):
         super().__post_init__()
         self.viewer.eye = (10.0, 0.0, 5.0)
         self.viewer.lookat = (0.0, 0.0, 1.0)
-        self.scene.num_envs = 4000
+        self.scene.num_envs = 1
         self.observations.policy.enable_corruption = False
-        self.commands.base_velocity.ranges.lin_vel_x = (2.0, 2.0)
-        self.commands.base_velocity.rel_standing_envs = 0.0
+        self.events.push_robot_interval = None
+        self.events.randomize_base_mass = None
